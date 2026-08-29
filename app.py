@@ -29,7 +29,7 @@ SERVICE_ACCOUNT_FILE = "service_account.json"
 # =====================================================================
 def get_drive_service():
     """Initializes secure service account connection to Google Drive."""
-    SCOPES = ['https://googleapis.com']
+        SCOPES = ['https://googleapis.com']
     if not os.path.exists(SERVICE_ACCOUNT_FILE):
         st.error(f"Missing {SERVICE_ACCOUNT_FILE} in your project directory!")
         return None
@@ -37,14 +37,38 @@ def get_drive_service():
     return build('drive', 'v3', credentials=creds)
 
 def search_standards(service, keyword):
-    """Searches the shared folder for documents containing the product keyword."""
-    query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and (name contains '{keyword}' or fullText contains '{keyword}') and mimeType = 'application/pdf'"
+    """
+    Scans the parent directory and recursively looks inside 
+    all nested sub-folders for files matching the product name.
+    """
     try:
-        results = service.files().list(q=query, fields="files(id, name)").execute()
-        return results.get('files', [])
+        # Step A: Find all child sub-folder IDs within the main database
+        folder_query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.folder'"
+        folder_results = service.files().list(q=folder_query, fields="files(id, name)").execute()
+        all_folder_ids = [f['id'] for f in folder_results.get('files', [])]
+        
+        # Always include the root directory ID in the search sweep list
+        all_folder_ids.append(GOOGLE_DRIVE_FOLDER_ID)
+        
+        # Step B: Build a combined query covering all discovered directories
+        parent_constraints = " or ".join([f"'{fid}' in parents" for fid in all_folder_ids])
+        file_query = f"({parent_constraints}) and (name contains '{keyword}' or fullText contains '{keyword}') and mimeType = 'application/pdf'"
+        
+        # Step C: Execute full file discovery sweep
+        file_results = service.files().list(
+            q=file_query, 
+            fields="files(id, name)",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True
+        ).execute()
+        
+        files = file_results.get('files', [])
+        return files[0] if files else None  # Return top relevant document match
+        
     except Exception as e:
-        st.error(f"Error searching Google Drive: {e}")
-        return []
+        st.error(f"Error traversing Google Drive sub-directories: {e}")
+        return None
+
 
 def download_and_extract_pdf_text(service, file_id):
     """Downloads matching document directly into RAM and extracts text strings."""
