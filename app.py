@@ -16,13 +16,15 @@ st.write("Analyze technical sheets and cross-reference your custom Google Drive 
 
 # ⚠️ PLACE YOUR OPENAI OR GEMINI API KEY HERE TO POWER THE REASONING
 # You can get a free Gemini API key from Google AI Studio
-API_KEY = "YOUR_AI_MODEL_API_KEY_HERE"
-genai.configure(api_key=API_KEY)
+# Pull the Anthropic Claude API Key securely from Cloud Secrets
+API_KEY = st.secrets["AI_MODEL_API_KEY"]
 
-# Enter the exact Folder ID from your Google Drive URL bar
-# Example: if your URL is ://google.com..., your ID is 1A2b3C...
-GOOGLE_DRIVE_FOLDER_ID = "YOUR_GOOGLE_DRIVE_FOLDER_ID_HERE"
-SERVICE_ACCOUNT_FILE = "service_account.json"
+# Pull your unique Moroccan Standards root Google Drive Folder ID
+GOOGLE_DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
+
+# This configuration variable is no longer needed since we authenticate from memory 
+SERVICE_ACCOUNT_FILE = None 
+
 
 # =====================================================================
 # 2. GOOGLE DRIVE BACKEND FUNCTIONS
