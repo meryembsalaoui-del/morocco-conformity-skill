@@ -248,17 +248,23 @@ norm, a PRODUCT-SPECIFIC norm, or a CONDITIONAL norm (applies only if the produc
 e.g. electrical parts or flammable materials - state the condition). Also list referenced or
 equivalent standards (EN, ISO, JIS...).
 
-Section 2 - Simplified scope: 2-4 plain sentences on what these norms together cover or exclude.
+Section 2 - Simplified scope: MAXIMUM 2 short sentences. Then one line exactly like this:
+"**In:** <products covered> — **Out:** <products excluded>". Keep it tight.
 
-Section 3 - Mandatory tests: ONE markdown table, 3 columns (norm & clause / test / acceptance
-criteria).
+Section 3 - Mandatory tests: ONE markdown table, 4 columns:
+"Applies? | Norm & clause | Test / characteristic | Acceptance criteria".
+Fill the "Applies?" column ONLY from the USER TECHNICAL DATA above:
+- 🎯 if the technical data shows this test is relevant to THIS product,
+- ➖ if it is clearly not applicable (add 2-3 word reason),
+- ❓ if the technical data does not say (verify).
+NEVER remove a test row. If no technical data was provided, put "—" in every Applies? cell.
 
 Section 4 - Labelling & marking: ONE markdown table, 4 columns (norm / required element /
 placement / language & legibility).
 
-Section 5 - Notes & gaps: flag any missing or garbled value (never invent one); and if a product
-feature might trigger an ADDITIONAL norm not among the documents provided (e.g. an electrical toy
-needing EN 62115), name it as a reminder.
+Section 5 - Notes & gaps: SHORT bullet points only (no paragraphs). Flag any missing or garbled
+value (never invent one); and if a product feature might trigger an ADDITIONAL norm not among the
+documents provided (e.g. an electrical toy needing EN 62115), name it as a bullet reminder.
 
 Use '###' markdown headings for each section title and proper markdown tables.
 """
@@ -286,15 +292,19 @@ Then use markdown with these sections:
 Section 1 - Likely applicable norm(s): the Moroccan NM and/or EN/ISO standards that most likely
 apply (your best estimate). Distinguish base / product-specific / conditional.
 
-Section 2 - Simplified scope: what such norms usually cover or exclude.
+Section 2 - Simplified scope: MAXIMUM 2 short sentences, then one line exactly like this:
+"**In:** <products usually covered> — **Out:** <products usually excluded>".
 
-Section 3 - Typical mandatory tests: ONE markdown table (norm & clause / test / typical criteria).
+Section 3 - Typical mandatory tests: ONE markdown table, 4 columns:
+"Applies? | Norm & clause | Test / characteristic | Typical criteria".
+Fill "Applies?" ONLY from the USER TECHNICAL DATA: 🎯 relevant, ➖ likely not (short reason),
+❓ can't tell (verify). Never remove a row. If no technical data was provided, put "—" everywhere.
 
 Section 4 - Typical labelling & marking: ONE markdown table (norm / element / placement /
 language & legibility).
 
-Section 5 - Cautions: state plainly what you could NOT confirm, and that the officer must locate
-the official NM text plus any decree or email instruction before deciding.
+Section 5 - Cautions: SHORT bullet points only. State what you could NOT confirm, and that the
+officer must locate the official NM text plus any decree or email instruction before deciding.
 
 CRITICAL: never invent a precise clause number or numeric threshold. Where you are not sure,
 write "verify" instead of a number. Use '###' markdown headings and proper markdown tables.
@@ -410,7 +420,8 @@ def report_to_docx(markdown_text, title, rtl=False):
 lang_label = st.selectbox("Output language / Langue de sortie / لغة النتيجة", list(LANGUAGES.keys()))
 kw_input = st.text_input("Product or norm codes (comma-separated):",
                          placeholder="e.g. jouet, EN 71, EN 62115")
-tech = st.text_area("Optional - paste technical-sheet text to narrow the match:")
+tech = st.text_area("Technical sheet (optional but recommended) - paste the product spec here to "
+                    "flag which tests apply 🎯 / likely not ➖ / verify ❓:")
 
 # --- Step 1: search + relevance ---
 if st.button("🔍 Search standards"):
