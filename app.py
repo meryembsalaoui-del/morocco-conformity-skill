@@ -179,7 +179,7 @@ One combined markdown table:
 - If a product feature might trigger an ADDITIONAL norm that is NOT among the documents
   provided (e.g. an electrical toy needing EN 62115), name it as a reminder.
 """
-    msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=6000, temperature=0,
+    msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=6000,
                                  messages=[{"role": "user", "content": prompt}])
     return msg.content[0].text
 
