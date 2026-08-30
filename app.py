@@ -45,6 +45,14 @@ if WORKSPACE_ID:
 else:
     client = anthropic.Anthropic(api_key=API_KEY)
 
+
+def claude_text(msg):
+    """Return the text from a Claude response, skipping any non-text (e.g. thinking) blocks."""
+    parts = [b.text for b in msg.content if getattr(b, "type", None) == "text"]
+    if not parts:
+        parts = [getattr(b, "text", "") for b in msg.content if hasattr(b, "text")]
+    return "".join(parts).strip()
+
 # ============================================================
 # 2. STYLING
 # ============================================================
@@ -178,7 +186,7 @@ Return ONLY a JSON array (no prose, no code fences). Each item:
 {{"file": "<exact filename>", "verdict": "Likely" or "Maybe" or "Unlikely", "reason": "<one short line>"}}"""
     msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=1500,
                                  messages=[{"role": "user", "content": prompt}])
-    raw = msg.content[0].text.strip().replace("```json", "").replace("```", "").strip()
+    raw = claude_text(msg).replace("```json", "").replace("```", "").strip()
     try:
         data = json.loads(raw)
         return {d["file"]: (d.get("verdict", "Maybe"), d.get("reason", "")) for d in data}
@@ -223,7 +231,7 @@ Use '###' markdown headings for each section title and proper markdown tables.
 """
     msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=6000,
                                  messages=[{"role": "user", "content": prompt}])
-    return msg.content[0].text
+    return claude_text(msg)
 
 
 # ============================================================
