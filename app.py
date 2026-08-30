@@ -135,6 +135,9 @@ def get_drive_service():
 
 
 def list_all_folder_ids(service, root_id):
+    cached = st.session_state.get("folder_ids")
+    if cached:
+        return cached
     all_ids, to_visit = [root_id], [root_id]
     while to_visit:
         parent = to_visit.pop()
@@ -146,7 +149,18 @@ def list_all_folder_ids(service, root_id):
         for f in resp.get("files", []):
             all_ids.append(f["id"])
             to_visit.append(f["id"])
+    st.session_state["folder_ids"] = all_ids
     return all_ids
+
+
+def _dedupe_key(name):
+    """Normalise a filename to the standard's code so duplicates collapse.
+    '22.6.200.pdf', '22_6_200.pdf', '22.6.200 (1).pdf', '22.6.200 copy.pdf' -> '226200'."""
+    n = name.lower().rsplit(".pdf", 1)[0]
+    n = re.sub(r"\s*\(\d+\)\s*$", "", n)             # drop "(1)"
+    n = re.sub(r"[\s_\-]*(copy|copie)\b.*$", "", n)  # drop "copy"
+    n = re.sub(r"[^a-z0-9]", "", n)                  # keep only the code characters
+    return n or name.lower()
 
 
 def search_standards(service, keywords):
@@ -165,11 +179,17 @@ def search_standards(service, keywords):
                                         includeItemsFromAllDrives=True,
                                         supportsAllDrives=True).execute()
             matches.extend(resp.get("files", []))
-    seen, unique = set(), []
+    # de-duplicate by file id AND by normalised standard code (collapses copies / same file in 2 folders)
+    seen_id, seen_key, unique = set(), set(), []
     for f in matches:
-        if f["id"] not in seen:
-            seen.add(f["id"])
-            unique.append(f)
+        if f["id"] in seen_id:
+            continue
+        seen_id.add(f["id"])
+        key = _dedupe_key(f["name"])
+        if key in seen_key:
+            continue
+        seen_key.add(key)
+        unique.append(f)
     return unique
 
 
