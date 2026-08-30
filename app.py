@@ -69,6 +69,12 @@ st.markdown(f"""
 div[data-testid="stMarkdownContainer"] table {{ width:100%; border-collapse:collapse; }}
 div[data-testid="stMarkdownContainer"] th {{ background:{MAROON}; color:#fff; padding:8px; text-align:left; }}
 div[data-testid="stMarkdownContainer"] td {{ border:1px solid #e6dcd7; padding:8px; }}
+/* ---- eye-catching report tabs ---- */
+button[data-baseweb="tab"] {{ font-weight:700; font-size:1.02rem; color:#9a8f8b; padding:6px 4px; }}
+button[data-baseweb="tab"]:hover {{ color:{MAROON}; }}
+button[data-baseweb="tab"][aria-selected="true"] {{ color:{MAROON}; }}
+[data-baseweb="tab-highlight"] {{ background-color:{MAROON}; height:3px; }}
+[data-baseweb="tab-list"] {{ gap:14px; border-bottom:2px solid #eaded9; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -271,10 +277,9 @@ USER TECHNICAL DATA: {tech_line}
 Write the ENTIRE response in {language} (translate the section titles too). Use markdown, with
 five sections in this order:
 
-Section 1 - Applied norm(s): list every norm found; for each, say whether it is a GENERAL/BASE
-norm, a PRODUCT-SPECIFIC norm, or a CONDITIONAL norm (applies only if the product has a feature,
-e.g. electrical parts or flammable materials - state the condition). Also list referenced or
-equivalent standards (EN, ISO, JIS...).
+Section 1 - Applied norm(s): SHORT bullet points only, one line per norm (no intro paragraph).
+For each, mark GENERAL/BASE, PRODUCT-SPECIFIC, or CONDITIONAL (state the condition). Add referenced
+or equivalent standards (EN, ISO, JIS...) as bullets too.
 
 Section 2 - Simplified scope: MAXIMUM 2 short sentences. Then one line exactly like this:
 "**In:** <products covered> — **Out:** <products excluded>". Keep it tight.
@@ -290,9 +295,10 @@ NEVER remove a test row. If no technical data was provided, put "—" in every A
 Section 4 - Labelling & marking: ONE markdown table, 4 columns (norm / required element /
 placement / language & legibility).
 
-Section 5 - Notes & gaps: SHORT bullet points only (no paragraphs). Flag any missing or garbled
-value (never invent one); and if a product feature might trigger an ADDITIONAL norm not among the
-documents provided (e.g. an electrical toy needing EN 62115), name it as a bullet reminder.
+Section 5 - Notes & gaps: AT MOST 6 short bullet points, most important first (no paragraphs).
+Flag any missing or garbled value (never invent one); and if a product feature might trigger an
+ADDITIONAL norm not among the documents provided (e.g. an electrical toy needing EN 62115), name
+it as a bullet reminder.
 
 Use '###' markdown headings for each section title and proper markdown tables.
 """
@@ -587,11 +593,17 @@ if report:
         sections.append((current_title, "\n".join(current_body)))
 
     def short(t):
-        t = re.sub(r"^\d+[\.\)\-]?\s*", "", t)  # drop leading "1." numbering
-        return (t[:22] + "…") if len(t) > 23 else t
+        t = re.sub(r"^\s*(section\s*)?\d+[\.\)\-]?\s*", "", t, flags=re.I)  # drop "Section 1 -"
+        t = t.lstrip(" -–—:•").strip()
+        return (t[:20] + "…") if len(t) > 21 else t
+
+    # Fixed order 1..5 -> icons. Scope / Tests / Marking (2,3,4) get vivid icons to catch the eye.
+    ICONS = ["📋", "🎯", "🧪", "🏷️", "📝"]
 
     if len(sections) >= 2:
-        tabs = st.tabs([short(t) for t, _ in sections])
+        labels = [f"{ICONS[i] if i < len(ICONS) else '•'} {short(t)}"
+                  for i, (t, _) in enumerate(sections)]
+        tabs = st.tabs(labels)
         for tab, (title, body) in zip(tabs, sections):
             with tab:
                 block = f"### {title}\n{body}"
