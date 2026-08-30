@@ -2,6 +2,7 @@ import io
 import os
 import re
 import json
+import base64
 import fitz  # PyMuPDF – reads text from PDFs
 import streamlit as st
 import anthropic
@@ -198,6 +199,31 @@ def extract_scope(text):
     return clean[:2500]
 
 
+def read_tech_upload(uploaded):
+    """Turn an uploaded technical sheet into usable content.
+    Returns (text, image_block). PDF with text -> text. Image or scanned PDF -> image_block
+    for Claude vision. Either may be None."""
+    if uploaded is None:
+        return None, None
+    data = uploaded.getvalue()
+    name = uploaded.name.lower()
+    if name.endswith(".pdf"):
+        try:
+            doc = fitz.open(stream=data, filetype="pdf")
+            text = "".join(p.get_text() for p in doc)
+            if len(text.strip()) > 40:            # real text PDF
+                return text, None
+            # scanned PDF -> render page 1 to PNG for vision
+            pix = doc[0].get_pixmap(dpi=150)
+            return None, {"media_type": "image/png",
+                          "data": base64.b64encode(pix.tobytes("png")).decode()}
+        except Exception:
+            return None, None
+    # image file
+    mt = "image/png" if name.endswith(".png") else "image/jpeg"
+    return None, {"media_type": mt, "data": base64.b64encode(data).decode()}
+
+
 # ============================================================
 # 4. CLAUDE - RELEVANCE + REPORT
 # ============================================================
@@ -227,16 +253,18 @@ Return ONLY a JSON array (no prose, no code fences). Each item:
         return {}
 
 
-def generate_report(product, tech_context, docs, language):
+def generate_report(product, tech_context, docs, language, tech_image=None):
     per_doc = 40000
     blocks = [f"=== SOURCE DOCUMENT: {name} ===\n{text[:per_doc]}" for name, text in docs]
     combined = "\n\n".join(blocks)
+    tech_line = tech_context or ("(see attached technical-sheet image)" if tech_image
+                                 else "(none provided)")
     prompt = f"""You are an expert Moroccan market-control and conformity-verification engineer
 (TTEC, VOC / PortNet, Law 24-09). You are given one or more official standards that all apply to
 the same product. Produce a single CONSOLIDATED verification profile combining them.
 
 TARGET PRODUCT: {product}
-USER TECHNICAL DATA: {tech_context or "(none provided)"}
+USER TECHNICAL DATA: {tech_line}
 
 {combined}
 
@@ -253,7 +281,7 @@ Section 2 - Simplified scope: MAXIMUM 2 short sentences. Then one line exactly l
 
 Section 3 - Mandatory tests: ONE markdown table, 4 columns:
 "Applies? | Norm & clause | Test / characteristic | Acceptance criteria".
-Fill the "Applies?" column ONLY from the USER TECHNICAL DATA above:
+Fill the "Applies?" column ONLY from the USER TECHNICAL DATA / attached technical sheet:
 - 🎯 if the technical data shows this test is relevant to THIS product,
 - ➖ if it is clearly not applicable (add 2-3 word reason),
 - ❓ if the technical data does not say (verify).
@@ -268,8 +296,12 @@ documents provided (e.g. an electrical toy needing EN 62115), name it as a bulle
 
 Use '###' markdown headings for each section title and proper markdown tables.
 """
+    content = [{"type": "text", "text": prompt}]
+    if tech_image:
+        content.append({"type": "image", "source": {
+            "type": "base64", "media_type": tech_image["media_type"], "data": tech_image["data"]}})
     msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=6000,
-                                 messages=[{"role": "user", "content": prompt}])
+                                 messages=[{"role": "user", "content": content}])
     return claude_text(msg)
 
 
@@ -422,6 +454,8 @@ kw_input = st.text_input("Product or norm codes (comma-separated):",
                          placeholder="e.g. jouet, EN 71, EN 62115")
 tech = st.text_area("Technical sheet (optional but recommended) - paste the product spec here to "
                     "flag which tests apply 🎯 / likely not ➖ / verify ❓:")
+tech_file = st.file_uploader("...or upload the technical sheet (PDF / JPG / PNG):",
+                             type=["pdf", "jpg", "jpeg", "png"])
 
 # --- Step 1: search + relevance ---
 if st.button("🔍 Search standards"):
@@ -437,7 +471,11 @@ if st.button("🔍 Search standards"):
                 files = search_standards(service, kws)
             st.session_state["files"] = files
             st.session_state["product"] = kw_input.strip()
-            st.session_state["tech"] = tech
+            # merge pasted text + any uploaded technical sheet
+            up_text, up_image = read_tech_upload(tech_file)
+            merged = "\n".join(t for t in [tech, up_text] if t and t.strip())
+            st.session_state["tech"] = merged
+            st.session_state["tech_image"] = up_image
             if files:
                 MAX_C = 25
                 candidates = files[:MAX_C]
@@ -513,7 +551,8 @@ if files is not None:
                 with st.spinner("Generating consolidated report..."):
                     st.session_state["report"] = generate_report(
                         st.session_state["product"], st.session_state.get("tech", ""),
-                        docs, LANGUAGES[lang_label]["code"])
+                        docs, LANGUAGES[lang_label]["code"],
+                        tech_image=st.session_state.get("tech_image"))
                     st.session_state["report_sources"] = [n for n, _ in docs]
                     st.session_state["report_rtl"] = LANGUAGES[lang_label]["rtl"]
                     st.session_state["report_unverified"] = False
@@ -531,10 +570,40 @@ if report:
         with st.expander("📄 Documents used in this report"):
             for n in st.session_state.get("report_sources", []):
                 st.write("•", n)
-    if st.session_state.get("report_rtl"):
-        st.markdown(f"<div dir='rtl'>{report}</div>", unsafe_allow_html=True)
+    rtl = st.session_state.get("report_rtl")
+
+    # Split the report into its "### " sections and show them as tabs for quick reading
+    sections = []
+    current_title, current_body = None, []
+    for ln in report.splitlines():
+        if ln.strip().startswith("###"):
+            if current_title is not None:
+                sections.append((current_title, "\n".join(current_body)))
+            current_title = ln.lstrip("#").strip()
+            current_body = []
+        else:
+            current_body.append(ln)
+    if current_title is not None:
+        sections.append((current_title, "\n".join(current_body)))
+
+    def short(t):
+        t = re.sub(r"^\d+[\.\)\-]?\s*", "", t)  # drop leading "1." numbering
+        return (t[:22] + "…") if len(t) > 23 else t
+
+    if len(sections) >= 2:
+        tabs = st.tabs([short(t) for t, _ in sections])
+        for tab, (title, body) in zip(tabs, sections):
+            with tab:
+                block = f"### {title}\n{body}"
+                if rtl:
+                    st.markdown(f"<div dir='rtl'>{block}</div>", unsafe_allow_html=True)
+                else:
+                    st.markdown(block)
     else:
-        st.markdown(report)
+        if rtl:
+            st.markdown(f"<div dir='rtl'>{report}</div>", unsafe_allow_html=True)
+        else:
+            st.markdown(report)
 
     title = st.session_state.get("product", "report")
     fname = "TTEC_conformity_report.docx"
