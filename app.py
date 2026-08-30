@@ -271,17 +271,13 @@ def read_tech_upload(uploaded):
 # 4. CLAUDE - RELEVANCE + REPORT
 # ============================================================
 def suggest_codes(product, language):
-    """From a product name/designation, suggest likely NM/EN/ISO codes to search (estimate)."""
-    prompt = f"""You are a Moroccan conformity officer (TTEC). The user has only a product name or
-designation, NOT a standard code: "{product}".
-List the standards most likely to apply, as your best estimate. Prefer the EN / ISO / IEC code
-because that is what usually appears in the filename (e.g. "EN 71", "EN 62115", "NM EN 60335",
-"ISO 3601"). Give the SHORT searchable form (e.g. "EN 71", not "EN 71-1:2014").
-
-Return ONLY a JSON array (no prose, no code fences), max 8 items, each:
-{{"code": "<short searchable code>", "reason": "<short reason in {language}>"}}
-These are suggestions to verify, not official confirmation."""
-    msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=1200,
+    """From a product name/designation, suggest likely codes to search. Keep it short."""
+    prompt = f"""Moroccan conformity officer (TTEC). The user has only a product name: "{product}".
+Give the standards most likely to apply, SHORT searchable code form (e.g. "EN 71", "EN 62115",
+"NM EN 60335", "ISO 3601"). Keep it minimal.
+Return ONLY a JSON array (no prose, no fences), max 6 items, each:
+{{"code": "<short code>", "reason": "<max 4 words in {language}>"}}"""
+    msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=700,
                                  messages=[{"role": "user", "content": prompt}])
     raw = claude_text(msg).replace("```json", "").replace("```", "").strip()
     try:
@@ -609,20 +605,9 @@ if st.button("🔍 Search standards") or st.session_state.pop("do_search", False
             st.session_state["tech"] = merged
             st.session_state["tech_image"] = up_image
             if files:
-                MAX_C = 25
-                candidates = files[:MAX_C]
-                with st.spinner(f"Reading the scope of {len(candidates)} document(s) to judge relevance..."):
-                    items = [(f["name"], extract_scope(get_text(service, f["id"]))) for f in candidates]
-                    st.session_state["relevance"] = judge_relevance(kw_input.strip(), items)
-                if len(files) > MAX_C:
-                    st.session_state["trunc_note"] = (
-                        f"{len(files)} hits found - judged the {MAX_C} first. For a tighter list, "
-                        f"refine the keyword (e.g. an NM or EN code).")
-                else:
-                    st.session_state.pop("trunc_note", None)
+                st.session_state.pop("trunc_note", None)
             else:
                 # No official document in the Drive -> automatic general-knowledge fallback
-                st.session_state["relevance"] = {}
                 with st.spinner("No official document found - preparing a general-knowledge estimate..."):
                     st.session_state["report"] = generate_from_knowledge(
                         kw_input.strip(), tech, LANGUAGES[lang_label]["code"])
@@ -636,38 +621,15 @@ if st.button("🔍 Search standards") or st.session_state.pop("do_search", False
 
 # --- Step 2: choose norms + analyse ---
 files = st.session_state.get("files")
-relevance = st.session_state.get("relevance", {})
 if files is not None:
     if not files:
         st.info("No official document found in the Drive for this search - showing a "
-                "general-knowledge estimate below. Tip: for a grounded answer, also try the NM code.")
+                "general-knowledge estimate below. Tip: try the code (💡 button) or the NM code.")
     else:
         names = [f["name"] for f in files]
-        trunc = st.session_state.get("trunc_note")
-        if trunc:
-            st.caption("ℹ️ " + trunc)
-        likely = [n for n in names if relevance.get(n, ("Maybe", ""))[0] == "Likely"]
-        others = [n for n in names if n not in likely]
-
-        if likely:
-            st.success(f"{len(likely)} standard(s) whose scope matches the product:")
-            for n in likely:
-                _, reason = relevance.get(n, ("Likely", ""))
-                st.markdown(f"🟢 **{n}** — {reason}")
-        else:
-            st.info("No standard's scope clearly matched this product. Open the list below to "
-                    "review the other hits, or refine your keyword.")
-
-        if others:
-            with st.expander(f"Show other {len(others)} document(s) (Maybe / Unlikely)"):
-                for n in others:
-                    verdict, reason = relevance.get(n, ("Maybe", ""))
-                    icon = {"Maybe": "🟡", "Unlikely": "🔴"}.get(verdict, "🟡")
-                    st.markdown(f"{icon} **{n}** — *{verdict}.* {reason}")
-
-        chosen = st.multiselect(
-            "Norms to analyse (pre-filled with the relevant ones; add or remove as needed):",
-            names, default=likely)
+        st.success(f"{len(files)} standard(s) found. Tick the ones to analyse:")
+        default = names if len(names) <= 6 else []
+        chosen = st.multiselect("Norms to analyse:", names, default=default)
         if st.button("✨ Analyse selected norms") and chosen:
             service = get_drive_service()
             docs, empty = [], []
