@@ -284,16 +284,18 @@ or equivalent standards (EN, ISO, JIS...) as bullets too.
 Section 2 - Simplified scope: MAXIMUM 2 short sentences. Then one line exactly like this:
 "**In:** <products covered> — **Out:** <products excluded>". Keep it tight.
 
-Section 3 - Mandatory tests: ONE markdown table, 4 columns:
-"Applies? | Norm & clause | Test / characteristic | Acceptance criteria".
+Section 3 - Mandatory tests: give a SEPARATE table for EACH standard (do not merge them).
+Under each standard, put a bold sub-heading with the norm name, then ONE markdown table, 4 columns:
+"Applies? | Clause | Test / characteristic | Acceptance criteria".
 Fill the "Applies?" column ONLY from the USER TECHNICAL DATA / attached technical sheet:
 - 🎯 if the technical data shows this test is relevant to THIS product,
 - ➖ if it is clearly not applicable (add 2-3 word reason),
 - ❓ if the technical data does not say (verify).
 NEVER remove a test row. If no technical data was provided, put "—" in every Applies? cell.
 
-Section 4 - Labelling & marking: ONE markdown table, 4 columns (norm / required element /
-placement / language & legibility).
+Section 4 - Labelling & marking: give a SEPARATE table for EACH standard (do not merge them).
+Under each standard, put a bold sub-heading with the norm name, then ONE markdown table, 3 columns
+(required element / placement / language & legibility).
 
 Section 5 - Notes & gaps: AT MOST 6 short bullet points, most important first (no paragraphs).
 Flag any missing or garbled value (never invent one); and if a product feature might trigger an
@@ -333,13 +335,14 @@ apply (your best estimate). Distinguish base / product-specific / conditional.
 Section 2 - Simplified scope: MAXIMUM 2 short sentences, then one line exactly like this:
 "**In:** <products usually covered> — **Out:** <products usually excluded>".
 
-Section 3 - Typical mandatory tests: ONE markdown table, 4 columns:
-"Applies? | Norm & clause | Test / characteristic | Typical criteria".
+Section 3 - Typical mandatory tests: give a SEPARATE table for EACH standard (do not merge).
+Under each, a bold norm sub-heading, then ONE table, 4 columns:
+"Applies? | Clause | Test / characteristic | Typical criteria".
 Fill "Applies?" ONLY from the USER TECHNICAL DATA: 🎯 relevant, ➖ likely not (short reason),
 ❓ can't tell (verify). Never remove a row. If no technical data was provided, put "—" everywhere.
 
-Section 4 - Typical labelling & marking: ONE markdown table (norm / element / placement /
-language & legibility).
+Section 4 - Typical labelling & marking: give a SEPARATE table for EACH standard. Under each, a
+bold norm sub-heading, then ONE table, 3 columns (element / placement / language & legibility).
 
 Section 5 - Cautions: SHORT bullet points only. State what you could NOT confirm, and that the
 officer must locate the official NM text plus any decree or email instruction before deciding.
