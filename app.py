@@ -165,6 +165,39 @@ def get_text(service, file_id):
     return text
 
 
+# Boilerplate lines that repeat on every page of IMANOR PDFs (drop them so they don't drown the scope)
+_BOILERPLATE = ("accordé sous licence", "licence pour utilisateur", "normalisation@imanor",
+                "tous droits réservés", "angle avenue kamal", "droits d'auteur")
+
+
+def _find_scope_start(low, clean):
+    """Find where the real scope section begins, skipping table-of-contents dotted lines."""
+    markers = ["domaine d'application", "champ d'application", "objet et domaine",
+               "1 objectif", "objectif", "1 objet", "objet", "1 scope", "scope"]
+    for m in markers:
+        start = 0
+        while True:
+            idx = low.find(m, start)
+            if idx == -1:
+                break
+            following = clean[idx + len(m): idx + len(m) + 120]
+            # a table-of-contents entry looks like "OBJECTIF ........... 3" (many dots)
+            if following.count(".") < 8:
+                return idx
+            start = idx + len(m)
+    return -1
+
+
+def extract_scope(text):
+    """Return the Objectif / Domaine d'application section so relevance is judged on real scope."""
+    clean = "\n".join(ln for ln in text.splitlines()
+                      if not any(b in ln.lower() for b in _BOILERPLATE))
+    idx = _find_scope_start(clean.lower(), clean)
+    if idx != -1:
+        return clean[idx: idx + 2500]
+    return clean[:2500]
+
+
 # ============================================================
 # 4. CLAUDE - RELEVANCE + REPORT
 # ============================================================
@@ -395,9 +428,17 @@ if st.button("🔍 Search standards"):
             st.session_state["product"] = kw_input.strip()
             st.session_state["tech"] = tech
             if files:
-                with st.spinner("Checking which standards actually fit the product..."):
-                    snippets = [(f["name"], get_text(service, f["id"])[:1500]) for f in files]
-                    st.session_state["relevance"] = judge_relevance(kw_input.strip(), snippets)
+                MAX_C = 25
+                candidates = files[:MAX_C]
+                with st.spinner(f"Reading the scope of {len(candidates)} document(s) to judge relevance..."):
+                    items = [(f["name"], extract_scope(get_text(service, f["id"]))) for f in candidates]
+                    st.session_state["relevance"] = judge_relevance(kw_input.strip(), items)
+                if len(files) > MAX_C:
+                    st.session_state["trunc_note"] = (
+                        f"{len(files)} hits found - judged the {MAX_C} first. For a tighter list, "
+                        f"refine the keyword (e.g. an NM or EN code).")
+                else:
+                    st.session_state.pop("trunc_note", None)
             else:
                 # No official document in the Drive -> automatic general-knowledge fallback
                 st.session_state["relevance"] = {}
@@ -421,14 +462,31 @@ if files is not None:
                 "general-knowledge estimate below. Tip: for a grounded answer, also try the NM code.")
     else:
         names = [f["name"] for f in files]
-        st.success(f"{len(files)} document(s) found. Relevance check below - untick anything wrong.")
-        icons = {"Likely": "🟢", "Maybe": "🟡", "Unlikely": "🔴"}
-        for n in names:
-            verdict, reason = relevance.get(n, ("Maybe", ""))
-            st.markdown(f"{icons.get(verdict, '🟡')} **{n}** — *{verdict}.* {reason}")
+        trunc = st.session_state.get("trunc_note")
+        if trunc:
+            st.caption("ℹ️ " + trunc)
         likely = [n for n in names if relevance.get(n, ("Maybe", ""))[0] == "Likely"]
-        default = likely or names
-        chosen = st.multiselect("Tick every norm that applies to this product:", names, default=default)
+        others = [n for n in names if n not in likely]
+
+        if likely:
+            st.success(f"{len(likely)} standard(s) whose scope matches the product:")
+            for n in likely:
+                _, reason = relevance.get(n, ("Likely", ""))
+                st.markdown(f"🟢 **{n}** — {reason}")
+        else:
+            st.info("No standard's scope clearly matched this product. Open the list below to "
+                    "review the other hits, or refine your keyword.")
+
+        if others:
+            with st.expander(f"Show other {len(others)} document(s) (Maybe / Unlikely)"):
+                for n in others:
+                    verdict, reason = relevance.get(n, ("Maybe", ""))
+                    icon = {"Maybe": "🟡", "Unlikely": "🔴"}.get(verdict, "🟡")
+                    st.markdown(f"{icon} **{n}** — *{verdict}.* {reason}")
+
+        chosen = st.multiselect(
+            "Norms to analyse (pre-filled with the relevant ones; add or remove as needed):",
+            names, default=likely)
         if st.button("✨ Analyse selected norms") and chosen:
             service = get_drive_service()
             docs, empty = [], []
