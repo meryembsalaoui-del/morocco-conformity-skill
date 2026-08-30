@@ -54,6 +54,25 @@ def claude_text(msg):
         parts = [getattr(b, "text", "") for b in msg.content if hasattr(b, "text")]
     return "".join(parts).strip()
 
+
+# ============================================================
+# 1b. OPTIONAL PASSWORD GATE
+# ============================================================
+# Add  APP_PASSWORD = "your_password"  in Streamlit Secrets to switch this on.
+# Leave it out and the app stays open (no gate).
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")
+if APP_PASSWORD:
+    if not st.session_state.get("auth_ok"):
+        st.title("🔒 TTEC Conformity Skill")
+        pw = st.text_input("Enter access password:", type="password")
+        if st.button("Enter"):
+            if pw == APP_PASSWORD:
+                st.session_state["auth_ok"] = True
+                st.rerun()
+            else:
+                st.error("Wrong password.")
+        st.stop()
+
 # ============================================================
 # 2. STYLING
 # ============================================================
@@ -355,6 +374,44 @@ write "verify" instead of a number. Use '###' markdown headings and proper markd
     return claude_text(msg)
 
 
+def generate_coverage(product, standard_docs, language, report_text=None, report_image=None):
+    """Compare a lab test report against the mandatory tests of the standard(s)."""
+    per_doc = 40000
+    blocks = [f"=== STANDARD: {name} ===\n{text[:per_doc]}" for name, text in standard_docs]
+    combined = "\n\n".join(blocks)
+    rep = (report_text[:30000] if report_text else "(see attached test-report image)")
+    prompt = f"""You are a Moroccan conformity officer (TTEC, VOC / PortNet). Compare a laboratory
+TEST REPORT against the mandatory tests of the applicable standard(s) for this product: {product}.
+
+APPLICABLE STANDARD(S):
+{combined}
+
+TEST REPORT CONTENT:
+{rep}
+
+Write the response in {language}, in markdown. Produce ONE table with columns:
+"Status | Required test (norm & clause) | Result found in the report | Note".
+Status must be exactly one of:
+- ✅ COVERED (the test is present in the report),
+- ❌ MISSING (required by the standard but not found in the report),
+- ⚠️ CHECK (present but the result looks failing, out of tolerance, or unclear).
+List EVERY mandatory test of the standard(s) as its own row.
+After the table, add one bold summary line: "X covered / Y missing / Z to check".
+
+CRITICAL: you only check what the report DOCUMENT states - you do NOT judge the authenticity or the
+technical validity of the laboratory work. End with one bold reminder line, in {language}, that the
+report's authenticity must be confirmed directly with the laboratory, and that this is a coverage
+check only, not an approval.
+"""
+    content = [{"type": "text", "text": prompt}]
+    if report_image:
+        content.append({"type": "image", "source": {
+            "type": "base64", "media_type": report_image["media_type"], "data": report_image["data"]}})
+    msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=4000,
+                                 messages=[{"role": "user", "content": content}])
+    return claude_text(msg)
+
+
 # ============================================================
 # 5. WORD EXPORT (with RTL support for Arabic)
 # ============================================================
@@ -563,6 +620,7 @@ if files is not None:
                         docs, LANGUAGES[lang_label]["code"],
                         tech_image=st.session_state.get("tech_image"))
                     st.session_state["report_sources"] = [n for n, _ in docs]
+                    st.session_state["analysed_docs"] = docs
                     st.session_state["report_rtl"] = LANGUAGES[lang_label]["rtl"]
                     st.session_state["report_unverified"] = False
 
@@ -631,3 +689,42 @@ if report:
         file_name=fname,
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
+
+# ============================================================
+# 7. TEST REPORT COVERAGE CHECK (optional, self-contained)
+# ============================================================
+analysed = st.session_state.get("analysed_docs")
+if analysed:
+    st.markdown('<hr class="ttec-rule">', unsafe_allow_html=True)
+    with st.expander("🧪 Test report coverage check (optional)"):
+        st.caption("Upload a lab test report to see which required tests are covered ✅ / missing ❌ "
+                   "/ to check ⚠️ against the standard(s) above. This reads what the report SAYS - it "
+                   "does NOT verify authenticity (confirm that directly with the laboratory).")
+        rep_file = st.file_uploader("Test report (PDF / JPG / PNG):",
+                                    type=["pdf", "jpg", "jpeg", "png"], key="rep_up")
+        rep_paste = st.text_area("...or paste the report text:", key="rep_paste")
+        if st.button("Check coverage"):
+            rtxt, rimg = read_tech_upload(rep_file)
+            merged = "\n".join(t for t in [rep_paste, rtxt] if t and t.strip())
+            if not merged and not rimg:
+                st.warning("Upload or paste a test report first.")
+            else:
+                with st.spinner("Comparing the report against the standard(s)..."):
+                    st.session_state["coverage"] = generate_coverage(
+                        st.session_state.get("product", ""), analysed,
+                        LANGUAGES[lang_label]["code"], report_text=merged or None,
+                        report_image=rimg)
+
+        cov = st.session_state.get("coverage")
+        if cov:
+            if st.session_state.get("report_rtl"):
+                st.markdown(f"<div dir='rtl'>{cov}</div>", unsafe_allow_html=True)
+            else:
+                st.markdown(cov)
+            st.download_button(
+                "⬇️ Download coverage (.docx)",
+                report_to_docx(cov, "Coverage - " + st.session_state.get("product", "report"),
+                               rtl=st.session_state.get("report_rtl", False)),
+                file_name="TTEC_coverage_check.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key="cov_dl")
