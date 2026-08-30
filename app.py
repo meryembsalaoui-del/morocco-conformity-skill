@@ -234,6 +234,43 @@ Use '###' markdown headings for each section title and proper markdown tables.
     return claude_text(msg)
 
 
+def generate_from_knowledge(product, tech_context, language):
+    """Fallback: no official document found, answer from general knowledge (UNVERIFIED)."""
+    prompt = f"""You are an expert Moroccan market-control and conformity-verification engineer
+(TTEC, VOC / PortNet, Law 24-09). NO official standard document was found in the library for this
+product, so you must answer FROM GENERAL KNOWLEDGE ONLY - this is an unverified estimate.
+
+TARGET PRODUCT: {product}
+USER TECHNICAL DATA: {tech_context or "(none provided)"}
+
+Write the ENTIRE response in {language} (translate the section titles too).
+Start with ONE bold warning line, in {language}, stating clearly that this is an UNVERIFIED
+general-knowledge estimate, NOT taken from an official document, and that every value must be
+checked against the real standard before use.
+
+Then use markdown with these sections:
+
+Section 1 - Likely applicable norm(s): the Moroccan NM and/or EN/ISO standards that most likely
+apply (your best estimate). Distinguish base / product-specific / conditional.
+
+Section 2 - Simplified scope: what such norms usually cover or exclude.
+
+Section 3 - Typical mandatory tests: ONE markdown table (norm & clause / test / typical criteria).
+
+Section 4 - Typical labelling & marking: ONE markdown table (norm / element / placement /
+language & legibility).
+
+Section 5 - Cautions: state plainly what you could NOT confirm, and that the officer must locate
+the official NM text plus any decree or email instruction before deciding.
+
+CRITICAL: never invent a precise clause number or numeric threshold. Where you are not sure,
+write "verify" instead of a number. Use '###' markdown headings and proper markdown tables.
+"""
+    msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=6000,
+                                 messages=[{"role": "user", "content": prompt}])
+    return claude_text(msg)
+
+
 # ============================================================
 # 5. WORD EXPORT (with RTL support for Arabic)
 # ============================================================
@@ -362,7 +399,14 @@ if st.button("🔍 Search standards"):
                     snippets = [(f["name"], get_text(service, f["id"])[:1500]) for f in files]
                     st.session_state["relevance"] = judge_relevance(kw_input.strip(), snippets)
             else:
+                # No official document in the Drive -> automatic general-knowledge fallback
                 st.session_state["relevance"] = {}
+                with st.spinner("No official document found - preparing a general-knowledge estimate..."):
+                    st.session_state["report"] = generate_from_knowledge(
+                        kw_input.strip(), tech, LANGUAGES[lang_label]["code"])
+                    st.session_state["report_sources"] = []
+                    st.session_state["report_rtl"] = LANGUAGES[lang_label]["rtl"]
+                    st.session_state["report_unverified"] = True
         except Exception as e:
             st.error(f"Error - check the [gcp_service_account] secret, the folder share, and that "
                      f"the Drive API is enabled. Details: {e}")
@@ -373,8 +417,8 @@ files = st.session_state.get("files")
 relevance = st.session_state.get("relevance", {})
 if files is not None:
     if not files:
-        st.error("No PDF matched. Try the NM code or another keyword - matching relies on "
-                 "Drive's full-text index of the PDF contents.")
+        st.info("No official document found in the Drive for this search - showing a "
+                "general-knowledge estimate below. Tip: for a grounded answer, also try the NM code.")
     else:
         names = [f["name"] for f in files]
         st.success(f"{len(files)} document(s) found. Relevance check below - untick anything wrong.")
@@ -403,22 +447,34 @@ if files is not None:
                         docs, LANGUAGES[lang_label]["code"])
                     st.session_state["report_sources"] = [n for n, _ in docs]
                     st.session_state["report_rtl"] = LANGUAGES[lang_label]["rtl"]
+                    st.session_state["report_unverified"] = False
 
 # --- Step 3: show report + download ---
 report = st.session_state.get("report")
 if report:
     st.markdown('<hr class="ttec-rule">', unsafe_allow_html=True)
-    with st.expander("📄 Documents used in this report"):
-        for n in st.session_state.get("report_sources", []):
-            st.write("•", n)
+    unverified = st.session_state.get("report_unverified", False)
+    if unverified:
+        st.warning("⚠️ UNVERIFIED — general-knowledge estimate, not from an official document. "
+                   "No matching standard was found in the Drive. Verify every value against the "
+                   "real NM text (and any decree / email instruction) before use.")
+    else:
+        with st.expander("📄 Documents used in this report"):
+            for n in st.session_state.get("report_sources", []):
+                st.write("•", n)
     if st.session_state.get("report_rtl"):
         st.markdown(f"<div dir='rtl'>{report}</div>", unsafe_allow_html=True)
     else:
         st.markdown(report)
+
+    title = st.session_state.get("product", "report")
+    fname = "TTEC_conformity_report.docx"
+    if unverified:
+        title = "[UNVERIFIED estimate] " + title
+        fname = "TTEC_UNVERIFIED_estimate.docx"
     st.download_button(
         "⬇️ Download as Word (.docx)",
-        report_to_docx(report, st.session_state.get("product", "report"),
-                       rtl=st.session_state.get("report_rtl", False)),
-        file_name="TTEC_conformity_report.docx",
+        report_to_docx(report, title, rtl=st.session_state.get("report_rtl", False)),
+        file_name=fname,
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
