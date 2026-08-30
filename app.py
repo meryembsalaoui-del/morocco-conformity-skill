@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import json
 import fitz  # PyMuPDF – reads text from PDFs
 import streamlit as st
 import anthropic
@@ -20,15 +21,29 @@ LOGO = "ttec_logo.png"
 CLAUDE_MODEL = "claude-sonnet-5"
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
+LANGUAGES = {
+    "English": {"code": "English", "rtl": False},
+    "Français": {"code": "French", "rtl": False},
+    "العربية (Arabic)": {"code": "Arabic", "rtl": True},
+}
+
 st.set_page_config(
     page_title="TTEC - Morocco Conformity Skill",
-    page_icon=LOGO if os.path.exists(LOGO) else "🇲🇦",
+    page_icon=LOGO if os.path.exists(LOGO) else "MA",
     layout="wide",
 )
 
 API_KEY = st.secrets["AI_MODEL_API_KEY"]
 GOOGLE_DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
-client = anthropic.Anthropic(api_key=API_KEY)
+WORKSPACE_ID = st.secrets.get("ANTHROPIC_WORKSPACE_ID", "")
+
+if WORKSPACE_ID:
+    client = anthropic.Anthropic(
+        api_key=API_KEY,
+        default_headers={"anthropic-workspace-id": WORKSPACE_ID},
+    )
+else:
+    client = anthropic.Anthropic(api_key=API_KEY)
 
 # ============================================================
 # 2. STYLING
@@ -64,10 +79,11 @@ with st.sidebar:
     if os.path.exists(LOGO):
         st.image(LOGO, width=150)
     st.markdown("### How it works")
-    st.markdown("1. Type a product **or several norm codes**, comma-separated.\n"
-                "2. Click **Search standards**.\n"
-                "3. **Tick every norm** that applies.\n"
-                "4. Click **Analyse** - one consolidated report.")
+    st.markdown("1. Choose the **output language**.\n"
+                "2. Type a product **or several norm codes**, comma-separated.\n"
+                "3. Click **Search standards**.\n"
+                "4. Review the relevance tags, **tick** the norms that apply.\n"
+                "5. Click **Analyse** - one consolidated report.")
     st.markdown("### Examples")
     st.code("embrayage")
     st.code("joint torique, ISO 3601, ISO 681")
@@ -100,7 +116,6 @@ def list_all_folder_ids(service, root_id):
 
 
 def search_standards(service, keywords):
-    """Search every folder under the root for PDFs matching ANY of the keywords."""
     folder_ids = list_all_folder_ids(service, GOOGLE_DRIVE_FOLDER_ID)
     matches = []
     for kw in keywords:
@@ -124,7 +139,11 @@ def search_standards(service, keywords):
     return unique
 
 
-def extract_pdf_text(service, file_id):
+def get_text(service, file_id):
+    """Download + extract text once, then cache it for the session."""
+    cache = st.session_state.setdefault("text_cache", {})
+    if file_id in cache:
+        return cache[file_id]
     request = service.files().get_media(fileId=file_id)
     buf = io.BytesIO()
     downloader = MediaIoBaseDownload(buf, request)
@@ -133,19 +152,46 @@ def extract_pdf_text(service, file_id):
         _, done = downloader.next_chunk()
     buf.seek(0)
     doc = fitz.open(stream=buf, filetype="pdf")
-    return "".join(page.get_text() for page in doc)
+    text = "".join(page.get_text() for page in doc)
+    cache[file_id] = text
+    return text
 
 
 # ============================================================
-# 4. CLAUDE ANALYSIS (consolidated, multi-norm)
+# 4. CLAUDE - RELEVANCE + REPORT
 # ============================================================
-def generate_report(product, tech_context, docs):
-    """docs = list of (filename, text). Produces one consolidated report."""
+def judge_relevance(product, items):
+    """items = [(filename, snippet)]. Returns {filename: (verdict, reason)}."""
+    listing = "\n\n".join(
+        [f"[{i+1}] FILE: {n}\nEXCERPT:\n{s[:1500]}" for i, (n, s) in enumerate(items)]
+    )
+    prompt = f"""You are a Moroccan conformity officer. The user is looking for the standards
+that actually apply to this product: "{product}".
+
+Below are candidate standard documents (filename + opening lines). For EACH document decide how
+likely it TRULY governs that product. A document that only mentions the word in passing is NOT
+relevant.
+
+{listing}
+
+Return ONLY a JSON array (no prose, no code fences). Each item:
+{{"file": "<exact filename>", "verdict": "Likely" or "Maybe" or "Unlikely", "reason": "<one short line>"}}"""
+    msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=1500,
+                                 messages=[{"role": "user", "content": prompt}])
+    raw = msg.content[0].text.strip().replace("```json", "").replace("```", "").strip()
+    try:
+        data = json.loads(raw)
+        return {d["file"]: (d.get("verdict", "Maybe"), d.get("reason", "")) for d in data}
+    except Exception:
+        return {}
+
+
+def generate_report(product, tech_context, docs, language):
     per_doc = 40000
     blocks = [f"=== SOURCE DOCUMENT: {name} ===\n{text[:per_doc]}" for name, text in docs]
     combined = "\n\n".join(blocks)
     prompt = f"""You are an expert Moroccan market-control and conformity-verification engineer
-(TTEC, VOC / PortNet, Law 24-09). You are given ONE OR MORE official standards that all apply to
+(TTEC, VOC / PortNet, Law 24-09). You are given one or more official standards that all apply to
 the same product. Produce a single CONSOLIDATED verification profile combining them.
 
 TARGET PRODUCT: {product}
@@ -153,31 +199,27 @@ USER TECHNICAL DATA: {tech_context or "(none provided)"}
 
 {combined}
 
-Reply in English, in markdown, with EXACTLY these sections:
+Write the ENTIRE response in {language} (translate the section titles too). Use markdown, with
+five sections in this order:
 
-### 1. Applied norm(s)
-List every norm found. For each, state in one line whether it is:
-- a GENERAL / BASE norm (whole product family),
-- a PRODUCT-SPECIFIC norm, or
-- a CONDITIONAL norm (applies only if the product has a feature - e.g. electrical parts,
-  flammable materials); state the condition.
-Also list referenced/equivalent standards (EN, ISO, JIS...).
+Section 1 - Applied norm(s): list every norm found; for each, say whether it is a GENERAL/BASE
+norm, a PRODUCT-SPECIFIC norm, or a CONDITIONAL norm (applies only if the product has a feature,
+e.g. electrical parts or flammable materials - state the condition). Also list referenced or
+equivalent standards (EN, ISO, JIS...).
 
-### 2. Simplified scope
-2-4 plain-language sentences on what these norms together apply to or exclude.
+Section 2 - Simplified scope: 2-4 plain sentences on what these norms together cover or exclude.
 
-### 3. Mandatory tests
-One combined markdown table:
-| Norm & clause | Test / characteristic | Acceptance criteria / threshold |
+Section 3 - Mandatory tests: ONE markdown table, 3 columns (norm & clause / test / acceptance
+criteria).
 
-### 4. Labelling & marking requirements
-One combined markdown table:
-| Norm | Required element | Placement | Language / legibility |
+Section 4 - Labelling & marking: ONE markdown table, 4 columns (norm / required element /
+placement / language & legibility).
 
-### 5. Notes & gaps
-- Flag any value that is missing or looks garbled in the source (never invent one).
-- If a product feature might trigger an ADDITIONAL norm that is NOT among the documents
-  provided (e.g. an electrical toy needing EN 62115), name it as a reminder.
+Section 5 - Notes & gaps: flag any missing or garbled value (never invent one); and if a product
+feature might trigger an ADDITIONAL norm not among the documents provided (e.g. an electrical toy
+needing EN 62115), name it as a reminder.
+
+Use '###' markdown headings for each section title and proper markdown tables.
 """
     msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=6000,
                                  messages=[{"role": "user", "content": prompt}])
@@ -185,8 +227,18 @@ One combined markdown table:
 
 
 # ============================================================
-# 5. WORD EXPORT
+# 5. WORD EXPORT (with RTL support for Arabic)
 # ============================================================
+def _set_rtl(paragraph):
+    pPr = paragraph._p.get_or_add_pPr()
+    pPr.append(OxmlElement("w:bidi"))
+    for run in paragraph.runs:
+        rPr = run._r.get_or_add_rPr()
+        rtl = OxmlElement("w:rtl")
+        rtl.set(qn("w:val"), "1")
+        rPr.append(rtl)
+
+
 def _add_runs(paragraph, text, force_bold=False, white=False):
     for part in re.split(r"(\*\*.+?\*\*)", text):
         if part.startswith("**") and part.endswith("**"):
@@ -207,7 +259,7 @@ def _shade(cell, hexcolor):
     tcPr.append(shd)
 
 
-def _add_table(doc, table_lines):
+def _add_table(doc, table_lines, rtl=False):
     rows = [[c.strip() for c in ln.strip().strip("|").split("|")] for ln in table_lines]
     rows = [r for r in rows if not all(set(c) <= set("-: ") and c != "" for c in r)]
     if not rows:
@@ -225,13 +277,17 @@ def _add_table(doc, table_lines):
                 _add_runs(p, txt, force_bold=True, white=True)
             else:
                 _add_runs(p, txt)
+            if rtl:
+                _set_rtl(p)
 
 
-def report_to_docx(markdown_text, title):
+def report_to_docx(markdown_text, title, rtl=False):
     doc = Document()
     h = doc.add_heading(level=0)
-    run = h.add_run(f"TTEC - Conformity Report: {title}")
+    run = h.add_run(f"TTEC - {title}")
     run.font.color.rgb = RGBColor(0x78, 0x35, 0x2A)
+    if rtl:
+        _set_rtl(h)
 
     lines = markdown_text.splitlines()
     i = 0
@@ -244,16 +300,25 @@ def report_to_docx(markdown_text, title):
             hh = doc.add_heading(line.lstrip("#").strip(), level=max(1, level))
             for r in hh.runs:
                 r.font.color.rgb = RGBColor(0x78, 0x35, 0x2A)
+            if rtl:
+                _set_rtl(hh)
             i += 1; continue
         if line.lstrip().startswith("|"):
             tbl = []
             while i < len(lines) and lines[i].lstrip().startswith("|"):
                 tbl.append(lines[i].strip()); i += 1
-            _add_table(doc, tbl); continue
+            _add_table(doc, tbl, rtl=rtl); continue
         if line.lstrip().startswith(("- ", "* ")):
             p = doc.add_paragraph(style="List Bullet")
-            _add_runs(p, line.lstrip()[2:]); i += 1; continue
-        _add_runs(doc.add_paragraph(), line); i += 1
+            _add_runs(p, line.lstrip()[2:])
+            if rtl:
+                _set_rtl(p)
+            i += 1; continue
+        p = doc.add_paragraph()
+        _add_runs(p, line)
+        if rtl:
+            _set_rtl(p)
+        i += 1
 
     buf = io.BytesIO()
     doc.save(buf)
@@ -264,11 +329,12 @@ def report_to_docx(markdown_text, title):
 # ============================================================
 # 6. USER INTERFACE
 # ============================================================
+lang_label = st.selectbox("Output language / Langue de sortie / لغة النتيجة", list(LANGUAGES.keys()))
 kw_input = st.text_input("Product or norm codes (comma-separated):",
                          placeholder="e.g. jouet, EN 71, EN 62115")
 tech = st.text_area("Optional - paste technical-sheet text to narrow the match:")
 
-# --- Step 1: search ---
+# --- Step 1: search + relevance ---
 if st.button("🔍 Search standards"):
     kws = [k for k in kw_input.split(",") if k.strip()]
     st.session_state.pop("report", None)
@@ -279,31 +345,45 @@ if st.button("🔍 Search standards"):
         try:
             service = get_drive_service()
             with st.spinner("Searching the TTEC standards library..."):
-                st.session_state["files"] = search_standards(service, kws)
-                st.session_state["product"] = kw_input.strip()
-                st.session_state["tech"] = tech
+                files = search_standards(service, kws)
+            st.session_state["files"] = files
+            st.session_state["product"] = kw_input.strip()
+            st.session_state["tech"] = tech
+            if files:
+                with st.spinner("Checking which standards actually fit the product..."):
+                    snippets = [(f["name"], get_text(service, f["id"])[:1500]) for f in files]
+                    st.session_state["relevance"] = judge_relevance(kw_input.strip(), snippets)
+            else:
+                st.session_state["relevance"] = {}
         except Exception as e:
-            st.error(f"Google Drive error - check the [gcp_service_account] secret, that the "
-                     f"folder is shared with the bot, and that the Drive API is enabled. Details: {e}")
+            st.error(f"Error - check the [gcp_service_account] secret, the folder share, and that "
+                     f"the Drive API is enabled. Details: {e}")
             st.session_state.pop("files", None)
 
 # --- Step 2: choose norms + analyse ---
 files = st.session_state.get("files")
+relevance = st.session_state.get("relevance", {})
 if files is not None:
     if not files:
         st.error("No PDF matched. Try the NM code or another keyword - matching relies on "
                  "Drive's full-text index of the PDF contents.")
     else:
         names = [f["name"] for f in files]
-        st.success(f"{len(files)} document(s) found.")
-        chosen = st.multiselect("Tick every norm that applies to this product:", names, default=names)
+        st.success(f"{len(files)} document(s) found. Relevance check below - untick anything wrong.")
+        icons = {"Likely": "🟢", "Maybe": "🟡", "Unlikely": "🔴"}
+        for n in names:
+            verdict, reason = relevance.get(n, ("Maybe", ""))
+            st.markdown(f"{icons.get(verdict, '🟡')} **{n}** — *{verdict}.* {reason}")
+        likely = [n for n in names if relevance.get(n, ("Maybe", ""))[0] == "Likely"]
+        default = likely or names
+        chosen = st.multiselect("Tick every norm that applies to this product:", names, default=default)
         if st.button("✨ Analyse selected norms") and chosen:
             service = get_drive_service()
             docs, empty = [], []
             with st.spinner("Reading documents..."):
                 for f in files:
                     if f["name"] in chosen:
-                        t = extract_pdf_text(service, f["id"])
+                        t = get_text(service, f["id"])
                         (docs if t.strip() else empty).append((f["name"], t))
             if empty:
                 st.warning("No extractable text (likely scans - OCR needed): "
@@ -311,8 +391,10 @@ if files is not None:
             if docs:
                 with st.spinner("Generating consolidated report..."):
                     st.session_state["report"] = generate_report(
-                        st.session_state["product"], st.session_state.get("tech", ""), docs)
+                        st.session_state["product"], st.session_state.get("tech", ""),
+                        docs, LANGUAGES[lang_label]["code"])
                     st.session_state["report_sources"] = [n for n, _ in docs]
+                    st.session_state["report_rtl"] = LANGUAGES[lang_label]["rtl"]
 
 # --- Step 3: show report + download ---
 report = st.session_state.get("report")
@@ -321,10 +403,14 @@ if report:
     with st.expander("📄 Documents used in this report"):
         for n in st.session_state.get("report_sources", []):
             st.write("•", n)
-    st.markdown(report)
+    if st.session_state.get("report_rtl"):
+        st.markdown(f"<div dir='rtl'>{report}</div>", unsafe_allow_html=True)
+    else:
+        st.markdown(report)
     st.download_button(
         "⬇️ Download as Word (.docx)",
-        report_to_docx(report, st.session_state.get("product", "report")),
+        report_to_docx(report, st.session_state.get("product", "report"),
+                       rtl=st.session_state.get("report_rtl", False)),
         file_name="TTEC_conformity_report.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
