@@ -627,9 +627,12 @@ if files is not None:
                 "general-knowledge estimate below. Tip: try the code (💡 button) or the NM code.")
     else:
         names = [f["name"] for f in files]
-        st.success(f"{len(files)} standard(s) found. Tick the ones to analyse:")
+        st.success(f"{len(files)} standard(s) found:")
+        for n in names:
+            title = n.rsplit(".pdf", 1)[0]
+            st.markdown(f"📄 **{title}**")
         default = names if len(names) <= 6 else []
-        chosen = st.multiselect("Norms to analyse:", names, default=default)
+        chosen = st.multiselect("Tick the ones to analyse:", names, default=default)
         if st.button("✨ Analyse selected norms") and chosen:
             service = get_drive_service()
             docs, empty = [], []
