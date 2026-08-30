@@ -1,165 +1,193 @@
-import os
 import io
-import fitz  # PyMuPDF for high-speed PDF text parsing
+import fitz  # PyMuPDF – reads text from PDFs
 import streamlit as st
-import google.generativeai as genai
+import anthropic
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
-# =====================================================================
-# 1. APPLICATION & CONFIGURATION SETUP
-# =====================================================================
-st.set_page_config(page_title="Morocco Conformity AI Skill", layout="wide")
-st.title("🇲🇦 Morocco Product Conformity Verification Skill")
-st.write("Analyze technical sheets and cross-reference your custom Google Drive norms repository.")
+# ============================================================
+# 1. CONFIG
+# ============================================================
+st.set_page_config(page_title="Morocco Conformity Skill", layout="wide")
+st.title("🇲🇦 Morocco Product Conformity Skill")
+st.caption("Type a product → get the applied norm(s), scope, tests and marking "
+           "rules, pulled from your Google Drive standards folder.")
 
-# ⚠️ PLACE YOUR OPENAI OR GEMINI API KEY HERE TO POWER THE REASONING
-# You can get a free Gemini API key from Google AI Studio
-# Pull the Anthropic Claude API Key securely from Cloud Secrets
+# Read-only access to Google Drive (this exact scope string matters)
+SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+
+# Model to use for the analysis
+CLAUDE_MODEL = "claude-sonnet-5"
+
+# Values come from Streamlit → Advanced settings → Secrets
 API_KEY = st.secrets["AI_MODEL_API_KEY"]
-
-# Pull your unique Moroccan Standards root Google Drive Folder ID
 GOOGLE_DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
 
-# This configuration variable is no longer needed since we authenticate from memory 
-SERVICE_ACCOUNT_FILE = None 
+client = anthropic.Anthropic(api_key=API_KEY)
 
-
-# =====================================================================
-# 2. GOOGLE DRIVE BACKEND FUNCTIONS
-# =====================================================================
+# ============================================================
+# 2. GOOGLE DRIVE
+# ============================================================
+@st.cache_resource
 def get_drive_service():
-    """Initializes secure service account connection to Google Drive."""
-        SCOPES = ['https://googleapis.com']
-    if not os.path.exists(SERVICE_ACCOUNT_FILE):
-        st.error(f"Missing {SERVICE_ACCOUNT_FILE} in your project directory!")
-        return None
-    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-    return build('drive', 'v3', credentials=creds)
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    return build("drive", "v3", credentials=creds)
 
-def search_standards(service, keyword):
-    """
-    Scans the parent directory and recursively looks inside 
-    all nested sub-folders for files matching the product name.
-    """
-    try:
-        # Step A: Find all child sub-folder IDs within the main database
-        folder_query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.folder'"
-        folder_results = service.files().list(q=folder_query, fields="files(id, name)").execute()
-        all_folder_ids = [f['id'] for f in folder_results.get('files', [])]
-        
-        # Always include the root directory ID in the search sweep list
-        all_folder_ids.append(GOOGLE_DRIVE_FOLDER_ID)
-        
-        # Step B: Build a combined query covering all discovered directories
-        parent_constraints = " or ".join([f"'{fid}' in parents" for fid in all_folder_ids])
-        file_query = f"({parent_constraints}) and (name contains '{keyword}' or fullText contains '{keyword}') and mimeType = 'application/pdf'"
-        
-        # Step C: Execute full file discovery sweep
-        file_results = service.files().list(
-            q=file_query, 
+
+def list_all_folder_ids(service, root_id):
+    """Walk the whole tree under the root folder and return every folder id."""
+    all_ids = [root_id]
+    to_visit = [root_id]
+    while to_visit:
+        parent = to_visit.pop()
+        q = (f"'{parent}' in parents "
+             f"and mimeType = 'application/vnd.google-apps.folder' "
+             f"and trashed = false")
+        resp = service.files().list(
+            q=q,
             fields="files(id, name)",
             includeItemsFromAllDrives=True,
-            supportsAllDrives=True
+            supportsAllDrives=True,
         ).execute()
-        
-        files = file_results.get('files', [])
-        return files[0] if files else None  # Return top relevant document match
-        
-    except Exception as e:
-        st.error(f"Error traversing Google Drive sub-directories: {e}")
-        return None
+        for f in resp.get("files", []):
+            all_ids.append(f["id"])
+            to_visit.append(f["id"])
+    return all_ids
 
 
-def download_and_extract_pdf_text(service, file_id):
-    """Downloads matching document directly into RAM and extracts text strings."""
+def search_standards(service, keyword):
+    """Find PDFs anywhere under the root whose name OR content matches keyword."""
+    folder_ids = list_all_folder_ids(service, GOOGLE_DRIVE_FOLDER_ID)
+    matches = []
+    # Query the folders in small chunks so the parent list never gets too long
+    for i in range(0, len(folder_ids), 15):
+        chunk = folder_ids[i:i + 15]
+        parents = " or ".join([f"'{fid}' in parents" for fid in chunk])
+        q = (f"({parents}) and mimeType = 'application/pdf' and trashed = false "
+             f"and (name contains '{keyword}' or fullText contains '{keyword}')")
+        resp = service.files().list(
+            q=q,
+            fields="files(id, name)",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+        ).execute()
+        matches.extend(resp.get("files", []))
+    # de-duplicate by id
+    seen, unique = set(), []
+    for f in matches:
+        if f["id"] not in seen:
+            seen.add(f["id"])
+            unique.append(f)
+    return unique
+
+
+def extract_pdf_text(service, file_id):
     request = service.files().get_media(fileId=file_id)
-    file_stream = io.BytesIO()
-    downloader = MediaIoBaseDownload(file_stream, request)
+    buf = io.BytesIO()
+    downloader = MediaIoBaseDownload(buf, request)
     done = False
     while not done:
-        status, done = downloader.next_chunk()
-    
-    file_stream.seek(0)
-    pdf_document = fitz.open(stream=file_stream, filetype="pdf")
-    text_content = ""
-    for page in pdf_document:
-        text_content += page.get_text()
-    return text_content
+        _, done = downloader.next_chunk()
+    buf.seek(0)
+    doc = fitz.open(stream=buf, filetype="pdf")
+    return "".join(page.get_text() for page in doc)
 
-# =====================================================================
-# 3. AI EXTRACTION ENGINE (THE SKILL LOGIC)
-# =====================================================================
-def generate_conformity_report(product, technical_context, standard_text, standard_name):
-    """Feeds norm text to AI engine to synthesize structured verification outputs."""
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    
-    prompt = f"""
-    You are an expert Moroccan market control and conformity verification engineer working under Law 24-09.
-    Analyze the following official regulatory standard text to create a strict verification profile.
-    
-    TARGET PRODUCT: {product}
-    USER TECHNICAL DATA: {technical_context}
-    REFERENCED DOCUMENT: {standard_name}
-    
-    STANDARD REGULATORY TEXT DATA:
-    {standard_text[:15000]}  # Safe token optimization truncation
-    
-    Format your response cleanly using markdown with the following structure:
-    
-    ### 1. Applied Norm(s)
-    * State the exact norm designation found in the text (e.g., NM EN 60335-1).
-    
-    ### 2. Simplified Scope Explanation
-    * Provide a 2-3 sentence non-technical summary explaining exactly what products this norm protects, applies to, or excludes.
-    
-    ### 3. Mandatory Laboratory Tests Required
-    * Create a markdown table with columns: [Test Name / Characteristic] | [Reference Clause] | [Success Criteria / Threshold]
-    * Populate with explicit tests found in the text (e.g., Dielectric strength, mechanical impact, flame resistance).
-    
-    ### 4. Labeling & Marking Requirements
-    * Create a markdown table with columns: [Required Element] | [Placement Location] | [Language / Legibility Rules]
-    * Detail things like CMIM mark placement, rated voltage markings, manufacturer name visibility, or required languages (e.g., Arabic).
-    """
-    
-    response = model.generate_content(prompt)
-    return response.text
 
-# =====================================================================
-# 4. USER INTERFACE (FRONTEND)
-# =====================================================================
-product_input = st.text_input("Enter product name or keyword (e.g., 'Chauffe-eau', 'Jouet', 'Câble'):")
-tech_sheet_input = st.text_area("Optional: Paste specifications or technical sheet text here to narrow the match:")
+# ============================================================
+# 3. CLAUDE ANALYSIS
+# ============================================================
+def generate_report(product, tech_context, standard_text, standard_name):
+    prompt = f"""You are an expert Moroccan market-control and conformity-verification
+engineer (VOC / PortNet, Law 24-09). Analyse the official standard text below and
+build a verification profile for the product.
 
-if st.button("Run Conformity Analysis ✨"):
-    if not product_input:
-        st.warning("Please specify a target product first.")
+TARGET PRODUCT: {product}
+USER TECHNICAL DATA: {tech_context or "(none provided)"}
+SOURCE DOCUMENT: {standard_name}
+
+STANDARD TEXT:
+{standard_text[:60000]}
+
+Reply in English, in markdown, with EXACTLY these four sections:
+
+### 1. Applied norm(s)
+State the exact norm designation(s) and any referenced or equivalent standards
+(EN, ISO, JIS, ...).
+
+### 2. Simplified scope
+2-3 plain-language sentences: what this norm covers, applies to, or excludes.
+
+### 3. Mandatory tests
+A markdown table with columns:
+| Test / characteristic | Clause | Acceptance criteria / threshold |
+
+### 4. Labelling & marking requirements
+A markdown table with columns:
+| Required element | Placement | Language / legibility |
+
+If a value is missing or looks garbled in the source, say so rather than inventing it.
+"""
+    msg = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=4000,
+        temperature=0,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return msg.content[0].text
+
+
+# ============================================================
+# 4. USER INTERFACE
+# ============================================================
+product = st.text_input(
+    "Product name or keyword (e.g. 'embrayage', 'chauffe-eau', 'jouet', 'câble'):"
+)
+tech = st.text_area("Optional — paste technical-sheet text to narrow the match:")
+
+# --- Step 1: search Drive ---
+if st.button("🔍 Search standards"):
+    if not product.strip():
+        st.warning("Type a product first.")
+        st.session_state.pop("files", None)
     else:
-        with st.spinner("Connecting to Google Drive Repository..."):
-            drive_api = get_drive_service()
-            
-            if drive_api:
-                # Find matching documents in your standards repository
-                matching_files = search_standards(drive_api, product_input)
-                
-                if not matching_files:
-                    st.error(f"No corresponding standard document found in your Drive folder matching: '{product_input}'")
-                else:
-                    st.success(f"Found standard: **{matching_files[0]['name']}**")
-                    
-                    # Extract document layers
-                    raw_text = download_and_extract_pdf_text(drive_api, matching_files[0]['id'])
-                    
-                    st.info("Analyzing standard text and generating compliance profiles...")
-                    # Run AI synthesis
-                    compliance_report = generate_conformity_report(
-                        product=product_input,
-                        technical_context=tech_sheet_input,
-                        standard_text=raw_text,
-                        standard_name=matching_files[0]['name']
+        try:
+            service = get_drive_service()
+            with st.spinner("Searching your Drive standards..."):
+                st.session_state["files"] = search_standards(service, product.strip())
+                st.session_state["product"] = product.strip()
+                st.session_state["tech"] = tech
+        except Exception as e:
+            st.error(f"Google Drive error — check your [gcp_service_account] secret "
+                     f"and that the folder is shared with the bot. Details: {e}")
+            st.session_state.pop("files", None)
+
+# --- Step 2: pick a document and analyse it ---
+files = st.session_state.get("files")
+if files is not None:
+    if not files:
+        st.error(
+            "No PDF matched. Your files are named by NM code, so matching relies on "
+            "Drive's full-text index of the PDF contents — try another keyword, or the NM code."
+        )
+    else:
+        names = [f["name"] for f in files]
+        choice = st.selectbox(f"{len(files)} document(s) found — pick one:", names)
+        if st.button("✨ Analyse this document"):
+            chosen = files[names.index(choice)]
+            service = get_drive_service()
+            with st.spinner(f"Reading {chosen['name']}..."):
+                text = extract_pdf_text(service, chosen["id"])
+            if not text.strip():
+                st.warning("This PDF has no extractable text (likely a scan — OCR needed).")
+            else:
+                with st.spinner("Generating report..."):
+                    report = generate_report(
+                        st.session_state["product"],
+                        st.session_state.get("tech", ""),
+                        text,
+                        chosen["name"],
                     )
-                    
-                    # Output final formatted tables to user dashboard screen
-                    st.markdown("---")
-                    st.markdown(compliance_report)
+                st.markdown("---")
+                st.markdown(report)
