@@ -154,12 +154,11 @@ def list_all_folder_ids(service, root_id):
 
 
 def _dedupe_key(name):
-    """Normalise a filename to the standard's code so duplicates collapse.
-    '22.6.200.pdf', '22_6_200.pdf', '22.6.200 (1).pdf', '22.6.200 copy.pdf' -> '226200'."""
+    """Normalise a filename to the standard's code so duplicates collapse."""
     n = name.lower().rsplit(".pdf", 1)[0]
-    n = re.sub(r"\s*\(\d+\)\s*$", "", n)             # drop "(1)"
-    n = re.sub(r"[\s_\-]*(copy|copie)\b.*$", "", n)  # drop "copy"
-    n = re.sub(r"[^a-z0-9]", "", n)                  # keep only the code characters
+    n = re.sub(r"\s*\(\d+\)\s*$", "", n)
+    n = re.sub(r"[\s_\-]*(copy|copie)\b.*$", "", n)
+    n = re.sub(r"[^a-z0-9]", "", n)
     return n or name.lower()
 
 
@@ -179,7 +178,6 @@ def search_standards(service, keywords):
                                         includeItemsFromAllDrives=True,
                                         supportsAllDrives=True).execute()
             matches.extend(resp.get("files", []))
-    # de-duplicate by file id AND by normalised standard code (collapses copies / same file in 2 folders)
     seen_id, seen_key, unique = set(), set(), []
     for f in matches:
         if f["id"] in seen_id:
@@ -272,6 +270,27 @@ def read_tech_upload(uploaded):
 # ============================================================
 # 4. CLAUDE - RELEVANCE + REPORT
 # ============================================================
+def suggest_codes(product, language):
+    """From a product name/designation, suggest likely NM/EN/ISO codes to search (estimate)."""
+    prompt = f"""You are a Moroccan conformity officer (TTEC). The user has only a product name or
+designation, NOT a standard code: "{product}".
+List the standards most likely to apply, as your best estimate. Prefer the EN / ISO / IEC code
+because that is what usually appears in the filename (e.g. "EN 71", "EN 62115", "NM EN 60335",
+"ISO 3601"). Give the SHORT searchable form (e.g. "EN 71", not "EN 71-1:2014").
+
+Return ONLY a JSON array (no prose, no code fences), max 8 items, each:
+{{"code": "<short searchable code>", "reason": "<short reason in {language}>"}}
+These are suggestions to verify, not official confirmation."""
+    msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=1200,
+                                 messages=[{"role": "user", "content": prompt}])
+    raw = claude_text(msg).replace("```json", "").replace("```", "").strip()
+    try:
+        data = json.loads(raw)
+        return [d for d in data if d.get("code")]
+    except Exception:
+        return []
+
+
 def judge_relevance(product, items):
     """items = [(filename, snippet)]. Returns {filename: (verdict, reason)}."""
     listing = "\n\n".join(
@@ -536,15 +555,42 @@ def report_to_docx(markdown_text, title, rtl=False):
 # 6. USER INTERFACE
 # ============================================================
 lang_label = st.selectbox("Output language / Langue de sortie / لغة النتيجة", list(LANGUAGES.keys()))
+
+# If the code-helper queued a search term, inject it BEFORE the text box is created
+if "inject_kw" in st.session_state:
+    st.session_state["kw_input"] = st.session_state.pop("inject_kw")
+
 kw_input = st.text_input("Product or norm codes (comma-separated):",
-                         placeholder="e.g. jouet, EN 71, EN 62115")
+                         placeholder="e.g. jouet, EN 71, EN 62115", key="kw_input")
+
+# --- Code-suggestion helper (when you only have a product name/designation) ---
+with st.container():
+    if st.button("💡 Suggest norm codes (I only have a product name)"):
+        if kw_input.strip():
+            with st.spinner("Suggesting likely standard codes..."):
+                st.session_state["code_sugg"] = suggest_codes(kw_input.strip(),
+                                                              LANGUAGES[lang_label]["code"])
+        else:
+            st.warning("Type a product name or designation first.")
+    sugg = st.session_state.get("code_sugg")
+    if sugg:
+        st.caption("💡 Likely codes (estimate — verify). These are what to search:")
+        for s in sugg:
+            st.markdown(f"🔎 **{s.get('code','')}** — {s.get('reason','')}")
+        codes_joined = ", ".join(s.get("code", "") for s in sugg if s.get("code"))
+        if st.button(f"🔍 Search these codes → {codes_joined[:70]}"):
+            st.session_state["inject_kw"] = codes_joined
+            st.session_state["do_search"] = True
+            st.session_state.pop("code_sugg", None)
+            st.rerun()
+
 tech = st.text_area("Technical sheet (optional but recommended) - paste the product spec here to "
                     "flag which tests apply 🎯 / likely not ➖ / verify ❓:")
 tech_file = st.file_uploader("...or upload the technical sheet (PDF / JPG / PNG):",
                              type=["pdf", "jpg", "jpeg", "png"])
 
 # --- Step 1: search + relevance ---
-if st.button("🔍 Search standards"):
+if st.button("🔍 Search standards") or st.session_state.pop("do_search", False):
     kws = [k for k in kw_input.split(",") if k.strip()]
     st.session_state.pop("report", None)
     if not kws:
