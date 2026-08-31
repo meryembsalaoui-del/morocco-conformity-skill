@@ -287,10 +287,28 @@ Return ONLY a JSON array (no prose, no fences), max 6 items, each:
         return []
 
 
-def count_hits(text, keywords):
-    """How many times the search keyword(s) appear in the PDF text (case-insensitive)."""
-    low = text.lower()
-    return sum(low.count(kw.strip().lower()) for kw in keywords if kw.strip())
+def rank_relevant(product, names):
+    """One fast call (filenames only, no downloads): return the most relevant filenames, best first."""
+    listing = "\n".join(f"- {n}" for n in names)
+    prompt = f"""Moroccan conformity officer. Product or keyword: "{product}".
+From the candidate standard FILENAMES below, return the ones MOST likely to apply to that product,
+ordered most-relevant first. Use the title meaning and your knowledge of which standards apply.
+Drop clearly-unrelated ones (e.g. gloves, toys, textiles when the product is footwear).
+Return at most 10 filenames.
+
+FILENAMES:
+{listing}
+
+Return ONLY a JSON array of the EXACT filenames, ordered most-relevant first. No prose, no fences."""
+    msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=1200,
+                                 messages=[{"role": "user", "content": prompt}])
+    raw = claude_text(msg).replace("```json", "").replace("```", "").strip()
+    try:
+        data = json.loads(raw)
+        valid = [n for n in data if n in names]   # keep only real filenames, in Claude's order
+        return valid or names
+    except Exception:
+        return names
 
 
 def judge_by_title(product, names):
@@ -636,23 +654,9 @@ if st.button("🔍 Search standards") or st.session_state.pop("do_search", False
             st.session_state["tech"] = merged
             st.session_state["tech_image"] = up_image
             if files:
-                st.session_state.pop("trunc_note", None)
                 with st.spinner("Sorting by relevance..."):
-                    verdict = judge_by_title(kw_input.strip(), [f["name"] for f in files])
-                st.session_state["title_verdict"] = verdict
-                # For code-only ('maybe') files, count keyword hits inside; promote if >= 5
-                HIT_THRESHOLD = 5
-                maybe_files = [f for f in files if verdict.get(f["name"]) not in ("yes", "no")][:15]
-                promoted, counts = [], {}
-                if maybe_files:
-                    with st.spinner(f"Checking the content of {len(maybe_files)} code-named file(s)..."):
-                        for f in maybe_files:
-                            c = count_hits(get_text(service, f["id"]), kws)
-                            counts[f["name"]] = c
-                            if c >= HIT_THRESHOLD:
-                                promoted.append(f["name"])
-                st.session_state["promoted"] = promoted
-                st.session_state["hit_counts"] = counts
+                    st.session_state["ranked"] = rank_relevant(
+                        kw_input.strip(), [f["name"] for f in files])
             else:
                 # No official document in the Drive -> automatic general-knowledge fallback
                 with st.spinner("No official document found - preparing a general-knowledge estimate..."):
@@ -674,43 +678,27 @@ if files is not None:
                 "general-knowledge estimate below. Tip: try the code (💡 button) or the NM code.")
     else:
         names = [f["name"] for f in files]
-        verdict = st.session_state.get("title_verdict", {})
-        promoted = set(st.session_state.get("promoted", []))
-        counts = st.session_state.get("hit_counts", {})
+        ranked = st.session_state.get("ranked") or names
 
         def title(n):
             return n.rsplit(".pdf", 1)[0]
 
-        yes = [n for n in names if verdict.get(n) == "yes"]
-        no = [n for n in names if verdict.get(n) == "no"]
-        maybe = [n for n in names if n not in yes and n not in no]
-        promoted_list = [n for n in maybe if n in promoted]
-        weak = [n for n in maybe if n not in promoted]
-        relevant = yes + promoted_list
+        top = ranked[:5]          # shown on screen
+        options = ranked[:10]     # available in the dropdown
 
-        if relevant:
-            st.success(f"{len(relevant)} relevant standard(s):")
-            for n in yes:
-                st.markdown(f"✅ **{title(n)}**")
-            for n in promoted_list:
-                st.markdown(f"✅ **{title(n)}**  ·  {counts.get(n, 0)} mentions")
-        else:
-            st.info("No clearly-relevant standard. Check the list below, or use 💡 to search by code.")
+        st.success("Most relevant standard(s):")
+        for n in top:
+            st.markdown(f"✅ **{title(n)}**")
 
-        if weak:
-            st.markdown("**Also found (few mentions – check if relevant):**")
-            for n in weak:
-                c = counts.get(n)
-                suffix = f"  ·  {c} mention(s)" if c is not None else ""
-                st.markdown(f"📄 {title(n)}{suffix}")
+        default = ranked[:3]
+        chosen = st.multiselect("Tick the ones to analyse (more options in the list):",
+                                options, default=default)
 
-        if no:
-            with st.expander(f"Hidden: {len(no)} result(s) about other products"):
-                for n in no:
+        rest = [n for n in names if n not in options]
+        if rest:
+            with st.expander(f"Show all {len(names)} matches"):
+                for n in rest:
                     st.markdown(f"• {title(n)}")
-
-        default = relevant if relevant else []
-        chosen = st.multiselect("Tick the ones to analyse:", names, default=default)
         if st.button("✨ Analyse selected norms") and chosen:
             service = get_drive_service()
             docs, empty = [], []
