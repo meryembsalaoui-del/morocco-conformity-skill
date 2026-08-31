@@ -287,6 +287,37 @@ Return ONLY a JSON array (no prose, no fences), max 6 items, each:
         return []
 
 
+def count_hits(text, keywords):
+    """How many times the search keyword(s) appear in the PDF text (case-insensitive)."""
+    low = text.lower()
+    return sum(low.count(kw.strip().lower()) for kw in keywords if kw.strip())
+
+
+def judge_by_title(product, names):
+    """Fast relevance from FILENAMES only (no downloads). Returns {name: 'yes'|'no'|'maybe'}."""
+    listing = "\n".join(f"- {n}" for n in names)
+    prompt = f"""Moroccan conformity officer. Target product: "{product}".
+Below are candidate standard FILENAMES. Judge, from the filename only, how likely each standard
+applies to THAT product:
+- "yes"   : the title clearly concerns this product,
+- "no"    : the title clearly concerns a DIFFERENT product (e.g. gloves, toys, textiles when the
+            product is footwear),
+- "maybe" : the filename is only a number/code with no description, or you cannot tell.
+
+FILENAMES:
+{listing}
+
+Return ONLY a JSON object mapping each EXACT filename to "yes" / "no" / "maybe".
+No prose, no code fences."""
+    msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=1500,
+                                 messages=[{"role": "user", "content": prompt}])
+    raw = claude_text(msg).replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
 def judge_relevance(product, items):
     """items = [(filename, snippet)]. Returns {filename: (verdict, reason)}."""
     listing = "\n\n".join(
@@ -606,6 +637,22 @@ if st.button("🔍 Search standards") or st.session_state.pop("do_search", False
             st.session_state["tech_image"] = up_image
             if files:
                 st.session_state.pop("trunc_note", None)
+                with st.spinner("Sorting by relevance..."):
+                    verdict = judge_by_title(kw_input.strip(), [f["name"] for f in files])
+                st.session_state["title_verdict"] = verdict
+                # For code-only ('maybe') files, count keyword hits inside; promote if >= 5
+                HIT_THRESHOLD = 5
+                maybe_files = [f for f in files if verdict.get(f["name"]) not in ("yes", "no")][:15]
+                promoted, counts = [], {}
+                if maybe_files:
+                    with st.spinner(f"Checking the content of {len(maybe_files)} code-named file(s)..."):
+                        for f in maybe_files:
+                            c = count_hits(get_text(service, f["id"]), kws)
+                            counts[f["name"]] = c
+                            if c >= HIT_THRESHOLD:
+                                promoted.append(f["name"])
+                st.session_state["promoted"] = promoted
+                st.session_state["hit_counts"] = counts
             else:
                 # No official document in the Drive -> automatic general-knowledge fallback
                 with st.spinner("No official document found - preparing a general-knowledge estimate..."):
@@ -627,11 +674,42 @@ if files is not None:
                 "general-knowledge estimate below. Tip: try the code (💡 button) or the NM code.")
     else:
         names = [f["name"] for f in files]
-        st.success(f"{len(files)} standard(s) found:")
-        for n in names:
-            title = n.rsplit(".pdf", 1)[0]
-            st.markdown(f"📄 **{title}**")
-        default = names if len(names) <= 6 else []
+        verdict = st.session_state.get("title_verdict", {})
+        promoted = set(st.session_state.get("promoted", []))
+        counts = st.session_state.get("hit_counts", {})
+
+        def title(n):
+            return n.rsplit(".pdf", 1)[0]
+
+        yes = [n for n in names if verdict.get(n) == "yes"]
+        no = [n for n in names if verdict.get(n) == "no"]
+        maybe = [n for n in names if n not in yes and n not in no]
+        promoted_list = [n for n in maybe if n in promoted]
+        weak = [n for n in maybe if n not in promoted]
+        relevant = yes + promoted_list
+
+        if relevant:
+            st.success(f"{len(relevant)} relevant standard(s):")
+            for n in yes:
+                st.markdown(f"✅ **{title(n)}**")
+            for n in promoted_list:
+                st.markdown(f"✅ **{title(n)}**  ·  {counts.get(n, 0)} mentions")
+        else:
+            st.info("No clearly-relevant standard. Check the list below, or use 💡 to search by code.")
+
+        if weak:
+            st.markdown("**Also found (few mentions – check if relevant):**")
+            for n in weak:
+                c = counts.get(n)
+                suffix = f"  ·  {c} mention(s)" if c is not None else ""
+                st.markdown(f"📄 {title(n)}{suffix}")
+
+        if no:
+            with st.expander(f"Hidden: {len(no)} result(s) about other products"):
+                for n in no:
+                    st.markdown(f"• {title(n)}")
+
+        default = relevant if relevant else []
         chosen = st.multiselect("Tick the ones to analyse:", names, default=default)
         if st.button("✨ Analyse selected norms") and chosen:
             service = get_drive_service()
